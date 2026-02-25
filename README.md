@@ -2,7 +2,11 @@
 
 Small Python agent that reviews recent Gmail messages with Ollama and sends important ones to Discord as webhook embeds.
 
-## What It Does
+## Motivation
+
+Newsletters, promos, and automated alerts quickly bury the few emails that actually matter, especially recruiter outreach, interview scheduling, and application updates. This project keeps Gmail as the source of truth while adding a lightweight “last-mile” notification layer that surfaces only high-signal career emails to Discord via webhooks.
+
+## What It Doess
 
 - Reads messages from Gmail (`gmail.readonly` scope).
 - Prompts model to decide whether each email is important.
@@ -25,10 +29,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If you want `.env` auto-loading, also install:
+Optional: install as a package (adds `email-agent` CLI).
 
 ```bash
-pip install python-dotenv
+pip install -e .
 ```
 
 ## Configuration
@@ -41,6 +45,12 @@ OLLAMA_MODEL=llama3.1
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 ```
 
+System prompt lookup order:
+
+1. `~/.email-agent/EMAILS.md`
+2. `./EMAILS.md`
+3. `./prompts/EMAILS.md`
+
 ## Gmail Setup
 
 1. Enable the Gmail API in Google Cloud.
@@ -51,34 +61,49 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 ## Run
 
 ```bash
-python main.py
+PYTHONPATH=src python -m email_agent.cli
+```
+
+If installed with `pip install -e .`:
+
+```bash
+email-agent
 ```
 
 Optional: override the message receipt window used for `GmailReader.get_messages(..., time_delta=...)`:
 
 ```bash
-python main.py --time-delta 30m
-python main.py --time-delta 2h
-python main.py --time-delta 1d
+PYTHONPATH=src python -m email_agent.cli --time-delta 30m
+PYTHONPATH=src python -m email_agent.cli --time-delta 2h
+PYTHONPATH=src python -m email_agent.cli --time-delta 1d
 ```
 
 ## Current Processing Behavior
 
 - Query starts with: `newer_than("1d").in_("inbox")`.
 - Reader fetches up to 50 messages.
-- Additional time filter keeps only emails received in the last 2 hours by default (`--time-delta` overrides this).
-- Prompt includes sender, subject, snippet, and body preview (first 500 chars).
+- Additional time filter keeps only emails received in the last hour by default (`--time-delta` overrides this).
+- Prompt includes sender, subject, snippet, and body preview (first 700 chars).
 - After all emails are reviewed, queued embeds are sent to Discord in batches of 10.
 
 ## Project Files
 
-- `main.py`: CLI entrypoint and argument parsing.
-- `agent.py`: Ollama decision logic, Gmail interactions, and notification orchestration.
-- `mail.py`: Gmail auth, query builder, and message wrapper utilities.
-- `discord.py`: Discord embed models, payload shaping, webhook send + chunking.
+- `src/email_agent/cli.py`: argument parsing and runtime orchestration.
+- `src/email_agent/config.py`: dotenv loading and prompt file resolution.
+- `src/email_agent/service.py`: email triage workflow.
+- `src/email_agent/clients/gmail_client.py`: Gmail auth, query builder, message wrappers.
+- `src/email_agent/clients/ollama_client.py`: Ollama chat/tool-call API client.
+- `src/email_agent/clients/discord_client.py`: Discord embed and webhook logic.
+- `prompts/EMAILS.md`: project prompt template.
 
 ## Notes
 
 - `token.json` and `credentials.json` are local secrets and should not be committed.
 - If no emails are marked important, no webhook request is sent.
 - You will need to customize prompts for your use case.
+
+## Roadmap
+
+- Regex pre-filtering.
+- Sub-prompts for different categories of email.
+- Labelling tool call.

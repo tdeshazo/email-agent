@@ -4,70 +4,52 @@ import json
 import os
 from datetime import timedelta
 from typing import Any
+from collections.abc import Callable
 
-import requests
+from .clients.discord_client import Embed, make_notifier, send_webhook_chunked
+from .clients.gmail_client import GmailMessage, GmailQueryBuilder, GmailReader
+from .clients.ollama_client import OllamaClient
+from .models import DEFAULT_MAX_RESULTS
 
-from discord import Embed, make_notifier, send_webhook_chunked
-from mail import GmailMessage, GmailQueryBuilder, GmailReader
-
-DEFAULT_MAX_RESULTS = 50
-
-TOOL_SCHEMA = [{
-    "type": "function",
-    "function": {
-        "name": "notify",
-        "description": "Notify the user of a relevant email",
-        "parameters": {
-            "type": "object",
-            "required": ["summary"],
-            "properties": {
-                "summary": {"type": "string", "description": "A summary of the email"},
-            },
-        },
-    },
-}]
+DEFAULT_SYSTEM_PROMPT = (
+    "You triage email for career opportunities. "
+    "Call `notify` only for recruiter/hiring outreach, interview scheduling, application status updates, "
+    "recruiter feedback/next steps, or clearly relevant job opportunities "
+    "(software/backend/data/automation/LIMS/Python/Go/SQL). "
+    "Ignore newsletters, promos, generic digests, social alerts, receipts, and unrelated email. "
+    "If unsure but likely recruiting/hiring, notify. "
+    "Call `notify` at most once. "
+    "Summary must be one sentence with: type, company/sender, role (if any), action/deadline (if any)."
+)
 
 
 class EmailAgent:
     def __init__(
         self,
-        ollama_chat_url: str | None = None,
-        ollama_model: str | None = None,
+        ollama_client: OllamaClient | None = None,
+        gmail_reader_factory: Callable[[], GmailReader] = GmailReader,
         webhook_url: str | None = None,
         max_results: int = DEFAULT_MAX_RESULTS,
+        system_prompt: str | None = None,
     ):
-        self.ollama_chat_url = ollama_chat_url or os.getenv("OLLAMA_CHAT_URL")
-        self.ollama_model = ollama_model or os.getenv("OLLAMA_MODEL")
+        self.ollama_client = ollama_client or OllamaClient()
+        self.gmail_reader_factory = gmail_reader_factory
         self.webhook_url = webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
         self.max_results = max_results
+        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
 
     def ollama_chat(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        if not self.ollama_chat_url:
-            raise ValueError("OLLAMA_CHAT_URL is required.")
-        if not self.ollama_model:
-            raise ValueError("OLLAMA_MODEL is required.")
-
-        payload = {
-            "model": self.ollama_model,
-            "messages": messages,
-            "tools": TOOL_SCHEMA,
-            "stream": False,
-        }
-        response = requests.post(self.ollama_chat_url, json=payload, timeout=60)
-        response.raise_for_status()
-        return response.json()
+        return self.ollama_client.chat(messages)
 
     @staticmethod
     def build_prompt(email: GmailMessage) -> str:
         body_preview = email.body().strip().replace("\n", " ")
-        body_preview = body_preview[:500]
+        body_preview = body_preview[:700]
         return (
-            "Decide if this email is important and if the user should be notified.\n"
             f"From: {email.sender()}\n"
             f"Subject: {email.subject()}\n"
             f"Snippet: {email.snippet()}\n"
-            f"Body preview: {body_preview}\n"
-            "If important, call the `notify` tool with a concise `summary`."
+            f"Body: {body_preview}\n"
         )
 
     @staticmethod
@@ -88,16 +70,17 @@ class EmailAgent:
             print("Skipping email with no message id.")
             return []
 
-        messages: list[dict[str, Any]] = [{"role": "user", "content": self.build_prompt(email)}]
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.build_prompt(email)},
+        ]
         notify = make_notifier(message_id, email.subject())
         embeds: list[Embed] = []
 
-        # 1) Model proposes a tool call.
         resp1 = self.ollama_chat(messages)
         assistant_msg = resp1.get("message", {})
         messages.append(assistant_msg)
 
-        # 2) Run tool(s) and append tool result(s).
         tool_calls = assistant_msg.get("tool_calls") or []
         for tc in tool_calls:
             function = tc.get("function", {})
@@ -116,18 +99,13 @@ class EmailAgent:
                     }
                 )
 
-        # 3) Model produces final answer.
         resp2 = self.ollama_chat(messages)
         print(resp2.get("message", {}).get("content", ""))
         return embeds
 
     def get_recent_messages(self, time_delta: timedelta | None) -> list[GmailMessage]:
-        reader = GmailReader()
-        query = (
-            GmailQueryBuilder()
-            .newer_than("1d")
-            .in_("inbox")
-        )
+        reader = self.gmail_reader_factory()
+        query = GmailQueryBuilder().newer_than("1d").in_("inbox")
         return reader.get_messages(
             query,
             max_results=self.max_results,

@@ -1,17 +1,11 @@
+from __future__ import annotations
+
 import argparse
 import re
 from datetime import timedelta
-from agent import EmailAgent
 
-try:
-    from dotenv import load_dotenv
-except ModuleNotFoundError:
-    load_dotenv = None
-
-if load_dotenv is not None:
-    load_dotenv()
-
-DEFAULT_TIME_DELTA = timedelta(hours=1)
+from .config import load_environment, load_system_prompt
+from .models import DEFAULT_TIME_DELTA, RunConfig
 
 
 def _parse_time_delta(raw_value: str) -> timedelta:
@@ -35,7 +29,7 @@ def _parse_time_delta(raw_value: str) -> timedelta:
     return timedelta(seconds=amount * unit_to_seconds[unit])
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> RunConfig:
     parser = argparse.ArgumentParser(
         description="Review recent Gmail messages and notify important ones to Discord."
     )
@@ -43,15 +37,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--time-delta",
         type=_parse_time_delta,
         default=DEFAULT_TIME_DELTA,
-        help="Only process emails received within this duration (e.g., 30m, 2h, 1d). Default: 2h.",
+        help=(
+            "Only process emails received within this duration "
+            "(e.g., 30m, 2h, 1d). Default: 1h."
+        ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    return RunConfig(time_delta=args.time_delta)
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _parse_args(argv)
-    agent = EmailAgent()
-    agent.run(time_delta=args.time_delta)
+    load_environment()
+    run_config = _parse_args(argv)
+    from .service import EmailAgent
+
+    system_prompt = load_system_prompt()
+    agent = EmailAgent(system_prompt=system_prompt)
+    agent.run(time_delta=run_config.time_delta)
 
 
 if __name__ == "__main__":
